@@ -9,118 +9,89 @@ st.set_page_config(page_title="Dashboard Setorial", layout="wide")
 st.title("Controle Setorial - Horas Extras e Gratificações")
 st.markdown("Faça o upload de **um ou vários** relatórios de *Resumo Contábil* para gerar o comparativo.")
 
-# 2. Função Inteligente para ler valores financeiros
-def extrair_valor_financeiro(texto):
-    """
-    Encontra o último bloco de números em uma linha de texto.
-    Resolve o problema do PDF gerar valores como '18.955.68' em vez de '18.955,68'
-    """
-    matches = re.findall(r'[\d\.,]+', texto)
-    if not matches:
-        return 0.0
-    
-    ultimo_num = matches[-1]
-    digitos = re.sub(r'\D', '', ultimo_num)
-    
-    if not digitos:
-        return 0.0
-    return float(digitos) / 100.0
-
-# 3. Processamento do PDF Setorial
+# 2. Processamento do PDF (Busca Flexível)
 @st.cache_data
 def processar_relatorios(arquivos):
-    todos_dados = []
+    todos_dados = {}
 
     for arquivo in arquivos:
-        mes_ano = "Indefinido"
-        dados_setores = {}
-        setor_atual = "Não Identificado"
-        
         with pdfplumber.open(arquivo) as pdf:
             for pagina in pdf.pages:
                 texto = pagina.extract_text()
                 if not texto: continue
                 
-                linhas = texto.split('\n')
+                # Acha o Mês/Ano da página
+                mes_ano = "Indefinido"
+                match_mes = re.search(r"Mês/Ano\s*(\d{2}/\d{4})", texto, re.IGNORECASE)
+                if match_mes:
+                    mes_ano = match_mes.group(1)
+                    
+                # Acha o Setor da página
+                setor_atual = "Não Identificado"
+                match_setor = re.search(r"Local de Trabalho:\s*(?:[\d]+\s*-\s*)?([^\n]+)", texto, re.IGNORECASE)
+                if match_setor:
+                    setor_atual = match_setor.group(1).strip()
+                    
+                if setor_atual == "Não Identificado":
+                    continue
+                    
+                # Cria a "gaveta" do setor para aquele mês se não existir
+                chave = f"{setor_atual}_{mes_ano}"
+                if chave not in todos_dados:
+                    todos_dados[chave] = {
+                        'Mês/Ano': mes_ano,
+                        'Setor': setor_atual,
+                        'Horas Extras 50%': 0.0,
+                        'Horas Extras 100%': 0.0,
+                        'Comp. Carga Horária': 0.0,
+                        'Gratificações': 0.0
+                    }
                 
-                for i, linha in enumerate(linhas):
-                    linha_lower = linha.lower()
-                    
-                    # Captura Mês/Ano
-                    if "mês/ano" in linha_lower:
-                        match_data = re.search(r"(\d{2}/\d{4})", linha)
-                        if match_data:
-                            mes_ano = match_data.group(1)
-                        elif i + 1 < len(linhas):
-                            match_data_prox = re.search(r"(\d{2}/\d{4})", linhas[i+1])
-                            if match_data_prox:
-                                mes_ano = match_data_prox.group(1)
-                                
-                    # Captura o Setor
-                    if "local de trabalho:" in linha_lower:
-                        partes = linha.split("Local de Trabalho:")
-                        if len(partes) > 1:
-                            setor_bruto = partes[1].strip()
-                            # Tira o código da frente (ex: "001001 - Hospital" -> "Hospital")
-                            if "-" in setor_bruto:
-                                setor_atual = setor_bruto.split("-", 1)[1].strip()
-                            else:
-                                setor_atual = setor_bruto
+                # Mapeamento exato do que procurar
+                padroes = {
+                    'Horas Extras 50%': r"horas extras 50%",
+                    'Horas Extras 100%': r"horas extras 100%",
+                    'Comp. Carga Horária': r"comp[\.\s]*carga hor[aá]ria",
+                    'Gratificações': r"(?:gratific lei|gratifica[cç][aã]o samu)"
+                }
+                
+                # Caça os valores ignorando a bagunça do PDF
+                for rubrica, padrao in padroes.items():
+                    for match in re.finditer(padrao, texto, re.IGNORECASE):
+                        # Pega o bloco de texto logo à frente da palavra encontrada (100 caracteres)
+                        trecho = texto[match.end():match.end()+100]
                         
-                        # Cria o "balde" para guardar os valores desse setor neste mês
-                        chave = f"{setor_atual}_{mes_ano}"
-                        if chave not in dados_setores:
-                            dados_setores[chave] = {
-                                'Mês/Ano': mes_ano,
-                                'Setor': setor_atual,
-                                'Horas Extras 50%': 0.0,
-                                'Horas Extras 100%': 0.0,
-                                'Comp. Carga Horária': 0.0,
-                                'Gratificações': 0.0
-                            }
-                            
-                    # Pula as linhas até achar o primeiro setor
-                    if setor_atual == "Não Identificado":
-                        continue
+                        # Acha todos os números com formato financeiro (X,XX ou X.XXX,XX ou X.XXX.XX)
+                        matches_monetarios = re.findall(r'\d+(?:[\.\,]\d{3})*[\.\,]\d{2}', trecho)
                         
-                    chave = f"{setor_atual}_{mes_ano}"
-                    
-                    # Varre as rubricas específicas que você pediu
-                    if "horas extras 50%" in linha_lower:
-                        dados_setores[chave]['Horas Extras 50%'] += extrair_valor_financeiro(linha)
-                    elif "horas extras 100%" in linha_lower:
-                        dados_setores[chave]['Horas Extras 100%'] += extrair_valor_financeiro(linha)
-                    elif "comp.carga horária" in linha_lower or "comp. carga horária" in linha_lower:
-                        dados_setores[chave]['Comp. Carga Horária'] += extrair_valor_financeiro(linha)
-                    elif "gratific lei" in linha_lower or "gratificação samu" in linha_lower:
-                        dados_setores[chave]['Gratificações'] += extrair_valor_financeiro(linha)
-                        
-        # Junta os dados do PDF atual na lista geral
-        todos_dados.extend(list(dados_setores.values()))
-        
+                        if len(matches_monetarios) >= 2:
+                            # O segundo número financeiro na tabela é sempre o Valor (o primeiro é a Referência)
+                            valor_str = matches_monetarios[1] 
+                            apenas_digitos = re.sub(r'\D', '', valor_str)
+                            todos_dados[chave][rubrica] += float(apenas_digitos) / 100.0
+                        elif len(matches_monetarios) == 1:
+                            # Prevenção caso o PDF cole a quantidade no valor de referência
+                            valor_str = matches_monetarios[0]
+                            apenas_digitos = re.sub(r'\D', '', valor_str)
+                            todos_dados[chave][rubrica] += float(apenas_digitos) / 100.0
+
     if not todos_dados:
         return pd.DataFrame()
         
-    df = pd.DataFrame(todos_dados)
+    # Transforma o dicionário em Tabela (DataFrame)
+    df = pd.DataFrame(list(todos_dados.values()))
     
-    # Remove setores que não tiveram NENHUM lançamento nessas 4 rubricas para limpar a tela
-    df['Soma_Verificacao'] = df['Horas Extras 50%'] + df['Horas Extras 100%'] + df['Comp. Carga Horária'] + df['Gratificações']
-    df = df[df['Soma_Verificacao'] > 0].drop(columns=['Soma_Verificacao'])
-    
-    # Cria a coluna de Total Geral do Setor
+    # Cria a coluna de Total e filtra os setores que estão zerados
     df['Total Geral (R$)'] = df['Horas Extras 50%'] + df['Horas Extras 100%'] + df['Comp. Carga Horária'] + df['Gratificações']
+    df = df[df['Total Geral (R$)'] > 0]
     
-    # Ordena pelo mês/ano para os gráficos ficarem na sequência certa
-    df = df.sort_values(by='Mês/Ano')
-    
-    return df
+    return df.sort_values(by='Mês/Ano')
 
-# 4. Interface do Usuário
-# O accept_multiple_files=True permite selecionar vários PDFs ao mesmo tempo
+# 3. Interface do Sistema
 arquivos_upload = st.file_uploader("Upload dos Resumos Contábeis (PDF)", type=["pdf"], accept_multiple_files=True)
 
 if arquivos_upload:
-    with st.spinner('Processando os relatórios...'):
+    with st.spinner('Lendo os relatórios e cruzando os dados...'):
         df = processar_relatorios(arquivos_upload)
         
     if not df.empty:
@@ -136,6 +107,7 @@ if arquivos_upload:
         
         if setor_selecionado == "Visão Geral (Todos os Setores)":
             st.subheader("📊 Comparativo Mensal - Visão Geral do Município")
+            # Agrupa os totais do município por mês
             df_grafico = df.groupby('Mês/Ano')[['Horas Extras 50%', 'Horas Extras 100%', 'Comp. Carga Horária', 'Gratificações']].sum().reset_index()
             
             fig = px.bar(
@@ -147,13 +119,14 @@ if arquivos_upload:
             )
             st.plotly_chart(fig, use_container_width=True)
             
-            st.subheader("📋 Tabela Consolidada (Todos os Setores)")
+            st.subheader("📋 Consolidado Setorial")
             df_tabela = df
             
         else:
             st.subheader(f"📊 Evolução Mensal - {setor_selecionado}")
             df_setor = df[df['Setor'] == setor_selecionado]
             
+            # Gráfico de linhas para ver a evolução de cada rubrica no setor escolhido
             fig = px.line(
                 df_setor, 
                 x='Mês/Ano', 
@@ -166,7 +139,7 @@ if arquivos_upload:
             st.subheader(f"📋 Lançamentos - {setor_selecionado}")
             df_tabela = df_setor
 
-        # Configura a exibição financeira na tabela
+        # Exibe a tabela bonitinha formatada em Reais
         st.dataframe(
             df_tabela,
             column_config={
