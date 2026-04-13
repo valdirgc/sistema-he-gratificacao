@@ -8,7 +8,6 @@ st.set_page_config(page_title="Dashboard Setorial", layout="wide")
 st.title("Controle Setorial - Horas Extras e Gratificações")
 st.markdown("Faça o upload dos **Resumos Contábeis em PDF** da Fiorilli.")
 
-# Remove qualquer letra ou pontuação inútil e força os 2 últimos dígitos como centavos
 def limpar_valor(valor_str):
     digitos = re.sub(r'\D', '', valor_str)
     if digitos:
@@ -22,76 +21,74 @@ def processar_pdf(arquivos):
 
     for arquivo in arquivos:
         with pdfplumber.open(arquivo) as pdf:
+            mes_atual = "Indefinido"
+            setor_atual = None
+
             for num_pagina, pagina in enumerate(pdf.pages):
                 texto = pagina.extract_text()
                 if not texto: continue
-                
-                linhas = texto.split('\n')
-                
-                mes_ano = "Indefinido"
-                setor_atual = "Não Identificado"
-                
-                # PASSO 1: Descobrir o Setor e o Mês da Página
-                for i, linha in enumerate(linhas):
-                    linha_lower = linha.lower()
-                    
-                    if "mês/ano" in linha_lower:
-                        match_mes = re.search(r"(\d{2}/\d{4})", linha)
-                        if match_mes: 
-                            mes_ano = match_mes.group(1)
-                        elif i + 1 < len(linhas):
-                            match_mes_prox = re.search(r"(\d{2}/\d{4})", linhas[i+1])
-                            if match_mes_prox: mes_ano = match_mes_prox.group(1)
-                            
-                    if "local de trabalho:" in linha_lower:
-                        setor_bruto = re.split(r'local de trabalho:', linha, flags=re.IGNORECASE)[1].strip()
-                        # Se estiver vazio na frente, pega a linha de baixo
-                        if not setor_bruto and i + 1 < len(linhas):
-                            setor_bruto = linhas[i+1].strip()
-                        
-                        # Limpa qualquer sujeira que a Fiorilli jogue na mesma linha
-                        setor_bruto = re.split(r'\s+mês/ano|\s+folha mensal|\s+total|\s+resumo', setor_bruto, flags=re.IGNORECASE)[0].strip()
-                        if "-" in setor_bruto:
-                            setor_atual = setor_bruto.split("-", 1)[1].strip()
-                        else:
-                            setor_atual = setor_bruto
 
-                if setor_atual == "Não Identificado" or not setor_atual:
+                # A MÁGICA: Remove todas as quebras de linha e junta tudo numa frase só (Tudo minúsculo para facilitar)
+                texto_limpo = re.sub(r'\s+', ' ', texto).lower()
+
+                # 1. Busca o Mês
+                match_mes = re.search(r"mês/ano\s*(\d{2}/\d{4})", texto_limpo)
+                if match_mes:
+                    mes_atual = match_mes.group(1)
+
+                # 2. Busca o Setor (Lê o que está entre 'Local de Trabalho:' e a próxima palavra chave do relatório)
+                match_setor = re.search(r"local de trabalho:\s*(?:\d+\s*-\s*)?([a-zà-ÿ0-9\s\.\-\"\']+?)\s+(?:mês/ano|folha|resumo|total)", texto_limpo)
+                if match_setor:
+                    setor_atual = match_setor.group(1).strip().title()
+
+                if not setor_atual:
                     continue
-                    
-                chave = f"{setor_atual}_{mes_ano}"
+
+                chave = f"{setor_atual}_{mes_atual}"
                 if chave not in dados_setores:
                     dados_setores[chave] = {
-                        'Mês/Ano': mes_ano,
+                        'Mês/Ano': mes_atual,
                         'Setor': setor_atual,
                         'Horas Extras (R$)': 0.0,
                         'Gratificações (R$)': 0.0
                     }
 
-                # PASSO 2: Caçar os valores à prova de erros de espaçamento
-                for linha in linhas:
-                    linha_lower = linha.lower()
-                    
-                    # Regex absoluto: Acha valores como 1.234,56 mesmo se estiverem grudados em letras
-                    valores_moeda = re.findall(r'(?<!\d)\d{1,3}(?:[\.\,]\d{3})*[\.\,]\d{2}(?!\d)', linha)
-                    
-                    if valores_moeda:
-                        valor_linha = limpar_valor(valores_moeda[-1]) # Pega o último número financeiro da linha
-                        
-                        # Captura Horas Extras e Complemento de Carga Horária
-                        if any(kw in linha_lower for kw in ["hora extra", "horas extras", "comp.carga", "comp. carga"]):
-                            # Sempre sobrepõe pelo MAIOR valor (o que garante que ele vai pegar o Total do Resumo e não de um só funcionário)
-                            if valor_linha > dados_setores[chave]['Horas Extras (R$)']:
-                                dados_setores[chave]['Horas Extras (R$)'] = valor_linha
-                                linha_log = linha.strip()[:80] # Pega só um pedaço para o log não ficar gigante
-                                log_extracao.append(f"Pág {num_pagina+1} | {setor_atual} -> Achou HE: R$ {valor_linha:.2f} (Lido de: {linha_log})")
+                # 3. Foca apenas no quadro de Resumo de Proventos para evitar linhas duplicadas de funcionários
+                match_resumo = re.search(r'resumo de proventos(.*?)(?:descontos|resumo de descontos|base de i\.r\.r\.f|$)', texto_limpo)
+                bloco_alvo = match_resumo.group(1) if match_resumo else texto_limpo
+
+                # 4. Função Caçadora Absoluta
+                def cacar_valor(palavras, bloco):
+                    maior = 0.0
+                    for kw in palavras:
+                        for match in re.finditer(re.escape(kw), bloco):
+                            # Pega os próximos 80 caracteres após a palavra encontrada
+                            trecho = bloco[match.end() : match.end() + 80]
+                            
+                            # Para de ler assim que encontrar a primeira letra da PRÓXIMA rubrica (ex: 'Insalubridade')
+                            match_letra = re.search(r'[a-zà-ÿ]', trecho)
+                            if match_letra:
+                                trecho = trecho[:match_letra.start()]
                                 
-                        # Captura Gratificações (SAMU, Lei 2291, etc)
-                        if any(kw in linha_lower for kw in ["gratific", "gratifica"]):
-                            if valor_linha > dados_setores[chave]['Gratificações (R$)']:
-                                dados_setores[chave]['Gratificações (R$)'] = valor_linha
-                                linha_log = linha.strip()[:80]
-                                log_extracao.append(f"Pág {num_pagina+1} | {setor_atual} -> Achou Gratificações: R$ {valor_linha:.2f} (Lido de: {linha_log})")
+                            # Puxa o último valor financeiro que ficou isolado no trecho
+                            numeros = re.findall(r'(?<!\d)\d{1,3}(?:[\.\,]\d{3})*[\.\,]\d{2}(?!\d)', trecho)
+                            if numeros:
+                                val = limpar_valor(numeros[-1])
+                                if val > maior: maior = val
+                    return maior
+
+                # Caça os valores usando todas as variações de palavras da prefeitura
+                he = cacar_valor(['hora extra', 'horas extras', 'comp.carga horária', 'comp. carga horária'], bloco_alvo)
+                grat = cacar_valor(['gratific', 'gratifica', 'samu'], bloco_alvo)
+
+                # Salva se encontrou algo
+                if he > dados_setores[chave]['Horas Extras (R$)']:
+                    dados_setores[chave]['Horas Extras (R$)'] = he
+                    log_extracao.append(f"✅ Pág {num_pagina+1} | {setor_atual}: Achou HE -> R$ {he}")
+
+                if grat > dados_setores[chave]['Gratificações (R$)']:
+                    dados_setores[chave]['Gratificações (R$)'] = grat
+                    log_extracao.append(f"✅ Pág {num_pagina+1} | {setor_atual}: Achou Gratificação -> R$ {grat}")
 
     if not dados_setores:
         return pd.DataFrame(), log_extracao
@@ -99,21 +96,19 @@ def processar_pdf(arquivos):
     df = pd.DataFrame(list(dados_setores.values()))
     df['Total Geral (R$)'] = df['Horas Extras (R$)'] + df['Gratificações (R$)']
     
-    # Exclui setores onde o valor final foi R$ 0,00
+    # Limpa da tela os setores que não tiveram nem Hora Extra nem Gratificação
     df = df[df['Total Geral (R$)'] > 0]
     
     return df.sort_values(by='Mês/Ano'), log_extracao
-
 
 # --- INTERFACE DO APLICATIVO ---
 arquivos_upload = st.file_uploader("Upload dos Resumos Contábeis (PDF)", type=["pdf"], accept_multiple_files=True)
 
 if arquivos_upload:
-    with st.spinner('Extraindo informações linha por linha...'):
+    with st.spinner('Esmagando a formatação do PDF e extraindo valores...'):
         df, logs = processar_pdf(arquivos_upload)
         
-    # --- MODO DIAGNÓSTICO ---
-    with st.expander("🛠️ Log de Extração (Clique para ver as linhas exatas que o sistema capturou)"):
+    with st.expander("🛠️ Log de Extração (Clique para ver as capturas da IA)"):
         if logs:
             for log in logs:
                 st.text(log)
@@ -131,7 +126,6 @@ if arquivos_upload:
         
         st.divider()
         
-        # Gráficos
         if setor_selecionado == "Visão Geral (Todos os Setores)":
             st.subheader("📊 Comparativo Mensal - Prefeitura (Totalizado)")
             df_grafico = df.groupby('Mês/Ano')[['Horas Extras (R$)', 'Gratificações (R$)']].sum().reset_index()
@@ -168,7 +162,6 @@ if arquivos_upload:
             hide_index=True,
             use_container_width=True
         )
-
     else:
         st.warning("Não localizamos nenhum valor de Hora Extra ou Gratificação nos PDFs enviados.")
 else:
