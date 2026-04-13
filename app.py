@@ -9,10 +9,40 @@ st.title("Controle Setorial - Horas Extras e Gratificações")
 st.markdown("Faça o upload dos **Resumos Contábeis em PDF** da Fiorilli.")
 
 def limpar_valor(valor_str):
+    # Pega apenas os números e transforma os últimos dois em centavos
     digitos = re.sub(r'\D', '', valor_str)
     if digitos:
         return float(digitos) / 100.0
     return 0.0
+
+def extrair_linhas_visuais(pagina):
+    """
+    O Raio-X: Lê as coordenadas exatas das palavras no PDF e as costura 
+    na mesma linha se estiverem na mesma altura, burlando as colunas invisíveis.
+    """
+    palavras = pagina.extract_words()
+    linhas_dict = {}
+    
+    for p in palavras:
+        y = round(p['top'])
+        encaixou = False
+        # Junta palavras que estejam na mesma linha (com tolerância de 4 pixels)
+        for y_linha in linhas_dict.keys():
+            if abs(y - y_linha) <= 4:
+                linhas_dict[y_linha].append(p)
+                encaixou = True
+                break
+        if not encaixou:
+            linhas_dict[y] = [p]
+            
+    linhas_texto = []
+    # Ordena de cima pra baixo, e depois da esquerda pra direita
+    for y in sorted(linhas_dict.keys()):
+        palavras_linha = sorted(linhas_dict[y], key=lambda x: x['x0'])
+        texto_linha = " ".join([p['text'] for p in palavras_linha])
+        linhas_texto.append(texto_linha)
+        
+    return linhas_texto
 
 @st.cache_data
 def processar_pdf(arquivos):
@@ -25,70 +55,63 @@ def processar_pdf(arquivos):
             setor_atual = None
 
             for num_pagina, pagina in enumerate(pdf.pages):
-                texto = pagina.extract_text()
-                if not texto: continue
-
-                # A MÁGICA: Remove todas as quebras de linha e junta tudo numa frase só (Tudo minúsculo para facilitar)
-                texto_limpo = re.sub(r'\s+', ' ', texto).lower()
-
-                # 1. Busca o Mês
-                match_mes = re.search(r"mês/ano\s*(\d{2}/\d{4})", texto_limpo)
-                if match_mes:
-                    mes_atual = match_mes.group(1)
-
-                # 2. Busca o Setor (Lê o que está entre 'Local de Trabalho:' e a próxima palavra chave do relatório)
-                match_setor = re.search(r"local de trabalho:\s*(?:\d+\s*-\s*)?([a-zà-ÿ0-9\s\.\-\"\']+?)\s+(?:mês/ano|folha|resumo|total)", texto_limpo)
-                if match_setor:
-                    setor_atual = match_setor.group(1).strip().title()
-
-                if not setor_atual:
-                    continue
-
-                chave = f"{setor_atual}_{mes_atual}"
-                if chave not in dados_setores:
-                    dados_setores[chave] = {
-                        'Mês/Ano': mes_atual,
-                        'Setor': setor_atual,
-                        'Horas Extras (R$)': 0.0,
-                        'Gratificações (R$)': 0.0
-                    }
-
-                # 3. Foca apenas no quadro de Resumo de Proventos para evitar linhas duplicadas de funcionários
-                match_resumo = re.search(r'resumo de proventos(.*?)(?:descontos|resumo de descontos|base de i\.r\.r\.f|$)', texto_limpo)
-                bloco_alvo = match_resumo.group(1) if match_resumo else texto_limpo
-
-                # 4. Função Caçadora Absoluta
-                def cacar_valor(palavras, bloco):
-                    maior = 0.0
-                    for kw in palavras:
-                        for match in re.finditer(re.escape(kw), bloco):
-                            # Pega os próximos 80 caracteres após a palavra encontrada
-                            trecho = bloco[match.end() : match.end() + 80]
+                # Usa o Raio-X em vez da extração de texto padrão
+                linhas_reais = extrair_linhas_visuais(pagina)
+                
+                for linha in linhas_reais:
+                    linha_lower = linha.lower()
+                    
+                    # 1. Puxa Mês/Ano
+                    if "mês/ano" in linha_lower:
+                        match = re.search(r"(\d{2}/\d{4})", linha)
+                        if match: mes_atual = match.group(1)
+                        
+                    # 2. Puxa o Setor isolado
+                    if "local de trabalho:" in linha_lower:
+                        partes = linha_lower.split("local de trabalho:")
+                        setor_bruto = partes[1].strip()
+                        # Limpa qualquer lixo que tenha caído na mesma linha
+                        setor_bruto = re.split(r'mês/ano|folha|página|total', setor_bruto)[0].strip()
+                        if "-" in setor_bruto:
+                            setor_atual = setor_bruto.split("-", 1)[1].strip().title()
+                        else:
+                            setor_atual = setor_bruto.title()
                             
-                            # Para de ler assim que encontrar a primeira letra da PRÓXIMA rubrica (ex: 'Insalubridade')
-                            match_letra = re.search(r'[a-zà-ÿ]', trecho)
-                            if match_letra:
-                                trecho = trecho[:match_letra.start()]
+                        # Cria a gaveta para o setor
+                        if setor_atual:
+                            chave = f"{setor_atual}_{mes_atual}"
+                            if chave not in dados_setores:
+                                dados_setores[chave] = {
+                                    'Mês/Ano': mes_atual,
+                                    'Setor': setor_atual,
+                                    'Horas Extras (R$)': 0.0,
+                                    'Gratificações (R$)': 0.0
+                                }
+
+                    # Ignora a página se não souber o setor
+                    if not setor_atual:
+                        continue
+                        
+                    chave = f"{setor_atual}_{mes_atual}"
+                    
+                    # 3. Caça Dinheiro e Palavras-chave na Mesma Linha Visível
+                    # Pega qualquer formato (1.234,56 ou 1234,56) isolado na frase
+                    numeros_moeda = re.findall(r'(?<!\d)\d{1,3}(?:[\.\,]\d{3})*[\.\,]\d{2}(?!\d)', linha)
+                    
+                    if numeros_moeda:
+                        ultimo_valor = limpar_valor(numeros_moeda[-1])
+                        
+                        # Testa Horas Extras e Complemento
+                        if any(kw in linha_lower for kw in ['hora extra', 'horas extras', 'comp.carga horária', 'comp. carga horária']):
+                            if ultimo_valor > dados_setores[chave]['Horas Extras (R$)']:
+                                dados_setores[chave]['Horas Extras (R$)'] = ultimo_valor
+                                log_extracao.append(f"✅ Pág {num_pagina+1} | {setor_atual}: HE -> R$ {ultimo_valor:.2f} (Linha: {linha[:80]})")
                                 
-                            # Puxa o último valor financeiro que ficou isolado no trecho
-                            numeros = re.findall(r'(?<!\d)\d{1,3}(?:[\.\,]\d{3})*[\.\,]\d{2}(?!\d)', trecho)
-                            if numeros:
-                                val = limpar_valor(numeros[-1])
-                                if val > maior: maior = val
-                    return maior
-
-                # Caça os valores usando todas as variações de palavras da prefeitura
-                he = cacar_valor(['hora extra', 'horas extras', 'comp.carga horária', 'comp. carga horária'], bloco_alvo)
-                grat = cacar_valor(['gratific', 'gratifica', 'samu'], bloco_alvo)
-
-                # Salva se encontrou algo
-                if he > dados_setores[chave]['Horas Extras (R$)']:
-                    dados_setores[chave]['Horas Extras (R$)'] = he
-                    log_extracao.append(f"✅ Pág {num_pagina+1} | {setor_atual}: Achou HE -> R$ {he}")
-
-                if grat > dados_setores[chave]['Gratificações (R$)']:
-                    dados_setores[chave]['Gratificações (R$)'] = grat
-                    log_extracao.append(f"✅ Pág {num_pagina+1} | {setor_atual}: Achou Gratificação -> R$ {grat}")
+                        # Testa Gratificações e SAMU
+                        if any(kw in linha_lower for kw in ['gratific', 'gratifica', 'samu']):
+                            if ultimo_valor > dados_setores[chave]['Gratificações (R$)']:
+                                dados_setores[chave]['Gratificações (R$)'] = ultimo_valor
+                                log_extracao.append(f"✅ Pág {num_pagina+1} | {setor_atual}: Gratificação -> R$ {ultimo_valor:.2f} (Linha: {linha[:80]})")
 
     if not dados_setores:
         return pd.DataFrame(), log_extracao
@@ -96,27 +119,26 @@ def processar_pdf(arquivos):
     df = pd.DataFrame(list(dados_setores.values()))
     df['Total Geral (R$)'] = df['Horas Extras (R$)'] + df['Gratificações (R$)']
     
-    # Limpa da tela os setores que não tiveram nem Hora Extra nem Gratificação
+    # Remove as linhas vazias do painel
     df = df[df['Total Geral (R$)'] > 0]
-    
     return df.sort_values(by='Mês/Ano'), log_extracao
 
 # --- INTERFACE DO APLICATIVO ---
 arquivos_upload = st.file_uploader("Upload dos Resumos Contábeis (PDF)", type=["pdf"], accept_multiple_files=True)
 
 if arquivos_upload:
-    with st.spinner('Esmagando a formatação do PDF e extraindo valores...'):
+    with st.spinner('Mapeando as coordenadas das palavras no PDF...'):
         df, logs = processar_pdf(arquivos_upload)
         
-    with st.expander("🛠️ Log de Extração (Clique para ver as capturas da IA)"):
+    with st.expander("🛠️ Log do Raio-X (Confira as linhas perfeitas que o sistema montou)"):
         if logs:
             for log in logs:
                 st.text(log)
         else:
-            st.text("Nenhum valor financeiro atrelado às palavras-chave foi encontrado.")
+            st.text("Nenhuma palavra-chave financeira foi detectada nas linhas montadas.")
             
     if not df.empty:
-        st.success("Dados lidos com sucesso!")
+        st.success("Dados lidos e decodificados com sucesso!")
         
         st.sidebar.header("Filtros Setoriais")
         lista_setores = df['Setor'].unique().tolist()
