@@ -8,94 +8,112 @@ st.set_page_config(page_title="Dashboard Setorial", layout="wide")
 st.title("Controle Setorial - Horas Extras e Gratificações")
 st.markdown("Faça o upload dos **Resumos Contábeis em PDF** da Fiorilli.")
 
+# Função blindada contra a bagunça de pontos e vírgulas da Fiorilli
+def limpar_valor(valor_str):
+    # Pega algo como '18.955.68' ou '1.763,20', tira os pontos/virgulas e força os últimos 2 dígitos como centavos
+    digitos = re.sub(r'\D', '', valor_str)
+    if digitos:
+        return float(digitos) / 100.0
+    return 0.0
+
 @st.cache_data
 def processar_pdf(arquivos):
     dados_setores = {}
+    log_extracao = []
 
     for arquivo in arquivos:
         with pdfplumber.open(arquivo) as pdf:
-            mes_ano = "Indefinido"
-            setor_atual = "Não Identificado"
-
-            for pagina in pdf.pages:
+            for num_pagina, pagina in enumerate(pdf.pages):
                 texto = pagina.extract_text()
                 if not texto: continue
                 
+                # Transforma a página inteira numa tripa de texto contínua para evitar quebras de linha falsas
+                texto_limpo = re.sub(r'\s+', ' ', texto)
                 linhas = texto.split('\n')
+                
+                mes_ano = "Indefinido"
+                setor_atual = "Não Identificado"
 
-                for linha in linhas:
+                # 1. Puxa o Mês/Ano e o Nome do Setor do cabeçalho da página
+                for i, linha in enumerate(linhas):
                     linha_lower = linha.lower()
-
-                    # 1. Captura o Mês/Ano (Data da folha)
                     if "mês/ano" in linha_lower:
                         match = re.search(r"(\d{2}/\d{4})", linha)
                         if match: mes_ano = match.group(1)
-
-                    # 2. Captura o Setor e cria a gaveta de dados dele
+                        elif i + 1 < len(linhas):
+                            match = re.search(r"(\d{2}/\d{4})", linhas[i+1])
+                            if match: mes_ano = match.group(1)
+                            
                     if "local de trabalho:" in linha_lower:
                         partes = linha.split("Local de Trabalho:")
                         if len(partes) > 1:
                             setor_bruto = partes[1].strip()
-                            # Tira o código da frente (ex: "001001 - Hospital" -> "Hospital")
                             if "-" in setor_bruto:
                                 setor_atual = setor_bruto.split("-", 1)[1].strip()
                             else:
                                 setor_atual = setor_bruto
-                            
-                            chave = f"{setor_atual}_{mes_ano}"
-                            if chave not in dados_setores:
-                                dados_setores[chave] = {
-                                    'Mês/Ano': mes_ano,
-                                    'Setor': setor_atual,
-                                    'Horas Extras (R$)': 0.0,
-                                    'Gratificações (R$)': 0.0
-                                }
+                        break # Achou o setor, pode parar de procurar nessa página
 
-                    if setor_atual == "Não Identificado":
-                        continue
-
-                    chave = f"{setor_atual}_{mes_ano}"
+                if setor_atual == "Não Identificado" or not setor_atual:
+                    continue
                     
-                    # 3. Mapeamento Exato do Vocabulário da Fiorilli
-                    # O regex abaixo acha qualquer número no formato de moeda (ex: 1.234,56 ou 123,45)
-                    padrao_moeda = r'\d{1,3}(?:\.\d{3})*,\d{2}'
+                # Cria a "gaveta" do setor
+                chave = f"{setor_atual}_{mes_ano}"
+                if chave not in dados_setores:
+                    dados_setores[chave] = {
+                        'Mês/Ano': mes_ano,
+                        'Setor': setor_atual,
+                        'Horas Extras (R$)': 0.0,
+                        'Gratificações (R$)': 0.0
+                    }
 
-                    # Caça Horas Extras e Complemento
-                    if any(x in linha_lower for x in ["comp.carga horária", "horas extras 50%", "horas extras 100%"]):
-                        valores = re.findall(padrao_moeda, linha)
-                        if valores:
-                            str_valor = valores[-1].replace('.', '').replace(',', '.')
-                            dados_setores[chave]['Horas Extras (R$)'] += float(str_valor)
+                # 2. Tiro de precisão: Vai direto no quadro de Resumo de Proventos buscar a soma consolidada
+                # Busca 'Hora Extra' seguida de dois blocos de números (Referência e Valor)
+                match_he = re.search(r"Horas?\s*Extras?\s+[\d\.,]+\s+([\d\.,]+)", texto_limpo, re.IGNORECASE)
+                if match_he:
+                    val_he = limpar_valor(match_he.group(1))
+                    if val_he > 0:
+                        dados_setores[chave]['Horas Extras (R$)'] = val_he
+                        log_extracao.append(f"Pág {num_pagina+1} | {setor_atual} -> Hora Extra: R$ {val_he:.2f}")
 
-                    # Caça Gratificações (Lei 2291, SAMU, etc)
-                    if any(x in linha_lower for x in ["gratific lei", "gratificação samu", "gratificacao samu"]):
-                        valores = re.findall(padrao_moeda, linha)
-                        if valores:
-                            str_valor = valores[-1].replace('.', '').replace(',', '.')
-                            dados_setores[chave]['Gratificações (R$)'] += float(str_valor)
+                # Busca 'Gratificações' seguida de dois blocos de números
+                match_grat = re.search(r"Gratifica\w*\s+[\d\.,]+\s+([\d\.,]+)", texto_limpo, re.IGNORECASE)
+                if match_grat:
+                    val_grat = limpar_valor(match_grat.group(1))
+                    if val_grat > 0:
+                        dados_setores[chave]['Gratificações (R$)'] = val_grat
+                        log_extracao.append(f"Pág {num_pagina+1} | {setor_atual} -> Gratificações: R$ {val_grat:.2f}")
 
     if not dados_setores:
-        return pd.DataFrame()
+        return pd.DataFrame(), log_extracao
 
     df = pd.DataFrame(list(dados_setores.values()))
     df['Total Geral (R$)'] = df['Horas Extras (R$)'] + df['Gratificações (R$)']
     
-    # Remove setores que tiveram zero nessas rubricas
+    # Remove apenas quem tem a soma zerada nessas rubricas especificas
     df = df[df['Total Geral (R$)'] > 0]
-    return df.sort_values(by='Mês/Ano')
+    
+    return df.sort_values(by='Mês/Ano'), log_extracao
 
 
 # --- INTERFACE DO APLICATIVO ---
 arquivos_upload = st.file_uploader("Upload dos Resumos Contábeis (PDF)", type=["pdf"], accept_multiple_files=True)
 
 if arquivos_upload:
-    with st.spinner('Puxando os dados dos relatórios...'):
-        df = processar_pdf(arquivos_upload)
+    with st.spinner('Lendo relatórios e consolidando valores...'):
+        df, logs = processar_pdf(arquivos_upload)
         
+    # --- MODO DIAGNÓSTICO ---
+    with st.expander("🛠️ Log de Extração (Clique para ver os valores lidos das páginas)"):
+        if logs:
+            for log in logs:
+                st.text(log)
+        else:
+            st.text("Nenhum valor encontrado nos relatórios.")
+            
     if not df.empty:
         st.success("Dados lidos com sucesso!")
         
-        # Filtros
         st.sidebar.header("Filtros Setoriais")
         lista_setores = df['Setor'].unique().tolist()
         lista_setores.sort()
@@ -106,7 +124,7 @@ if arquivos_upload:
         
         # Gráficos
         if setor_selecionado == "Visão Geral (Todos os Setores)":
-            st.subheader("📊 Comparativo Mensal - Prefeitura")
+            st.subheader("📊 Comparativo Mensal - Prefeitura (Totalizado)")
             df_grafico = df.groupby('Mês/Ano')[['Horas Extras (R$)', 'Gratificações (R$)']].sum().reset_index()
             
             fig = px.bar(
@@ -130,7 +148,6 @@ if arquivos_upload:
             st.plotly_chart(fig, use_container_width=True)
             df_tabela = df_setor
 
-        # Tabela
         st.subheader("📋 Consolidado")
         st.dataframe(
             df_tabela,
