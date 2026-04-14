@@ -34,12 +34,15 @@ if "relatorio_recem_enviado" not in st.session_state:
 
 # Lógica de Auto-Login via Cookie
 try:
-    pacote_sessao = cookie_manager.get(cookie="sessao_folha")
-    if pacote_sessao and not st.session_state.autenticado:
-        dados = pacote_sessao if isinstance(pacote_sessao, dict) else json.loads(pacote_sessao)
-        st.session_state.autenticado = True
-        st.session_state.usuario_logado = dados["user"]
-        st.session_state.nivel_acesso = dados["nivel"]
+    if st.session_state.ignorar_cookie:
+        st.session_state.ignorar_cookie = False
+    else:
+        pacote_sessao = cookie_manager.get(cookie="sessao_folha")
+        if pacote_sessao and not st.session_state.autenticado:
+            dados = pacote_sessao if isinstance(pacote_sessao, dict) else json.loads(pacote_sessao)
+            st.session_state.autenticado = True
+            st.session_state.usuario_logado = dados["user"]
+            st.session_state.nivel_acesso = dados["nivel"]
 except:
     pass
 
@@ -64,7 +67,7 @@ st.markdown("""
 MESES_PT = {
     "01": "Janeiro", "02": "Fevereiro", "03": "Março", "04": "Abril",
     "05": "Maio", "06": "Junho", "07": "Julho", "08": "Agosto",
-    "09": "Setembro", "10": "Outubro", "11": "Novembro", "12": "Dezembro", "00": "Desconhecido"
+    "09": "Setembro", "10": "Outubro", "11": "Novembro", "12": "Dezembro"
 }
 
 RUBRICAS = {
@@ -142,6 +145,7 @@ def extrair_dados_ocr(arquivos):
 
     df = pd.DataFrame(registros)
     if not df.empty:
+        # Ajuste de Datas
         data_final = df[df['Mês/Ano Numérico'] != 'Indefinido']['Mês/Ano Numérico'].max()
         if pd.notna(data_final):
             df['Mês/Ano Numérico'] = data_final
@@ -216,7 +220,7 @@ except:
 st.sidebar.markdown("<h3 style='text-align:center;'>Jaborandi/SP</h3>", unsafe_allow_html=True)
 st.sidebar.write("---")
 
-ano_sel = st.sidebar.selectbox("Ano de Referência", sorted(df_db["Ano"].unique(), reverse=True)) if not df_db.empty and "Ano" in df_db.columns else None
+ano_sel = st.sidebar.selectbox("Ano de Referência", sorted(df_db["Ano"].dropna().unique(), reverse=True)) if not df_db.empty and "Ano" in df_db.columns else None
 df_ano = df_db[df_db["Ano"] == ano_sel] if ano_sel else pd.DataFrame()
 
 if not df_ano.empty:
@@ -261,7 +265,6 @@ if st.session_state.nivel_acesso == "admin":
                     final_to_save = df_homolog[~df_homolog["Mês/Ano Numérico"].isin(meses_existentes)]
                     
                     if not final_to_save.empty:
-                        # Prepara o df_db vazio se for o primeiro envio
                         if df_db.empty:
                             df_completo = final_to_save
                         else:
@@ -281,9 +284,10 @@ if not df_ano.empty and "Mês/Ano Exibição" in df_ano.columns:
     st.write("---")
     t1, t2, t3, t4 = st.tabs(["📈 Geral", "🏢 Por Setor", "🔍 Por Rubrica", "📅 Comparativo Anual"])
 
-    # Consolidação para os gráficos
+    # Consolidação para os gráficos (Agrupado por Mês e Setor)
     df_piv = df_ano.pivot_table(index=['Mês/Ano Exibição', 'Setor'], columns='Tipo', values='Valor (R$)', aggfunc='sum').fillna(0).reset_index()
 
+    # --- ABA 1: GERAL ---
     with t1:
         c1, c2 = st.columns(2)
         res_geral = df_piv.groupby("Mês/Ano Exibição", sort=False).sum().reset_index()
@@ -293,20 +297,40 @@ if not df_ano.empty and "Mês/Ano Exibição" in df_ano.columns:
         if "Gratificação" in res_geral.columns:
             c2.plotly_chart(px.bar(res_geral, x="Mês/Ano Exibição", y="Gratificação", title="Total Gratificações", color_discrete_sequence=["#FF7F0E"], category_orders={"Mês/Ano Exibição": ordem_cronologica}), use_container_width=True)
         
+        st.write("**Resumo Geral Consolidado**")
         st.dataframe(res_geral.style.format({"Hora Extra": "R$ {:.2f}", "Gratificação": "R$ {:.2f}"}), use_container_width=True, hide_index=True)
 
+    # --- ABA 2: SETOR ---
     with t2:
         setor = st.selectbox("Filtrar Setor", df_piv["Setor"].unique())
         df_s = df_piv[df_piv["Setor"] == setor]
         colunas_y = [c for c in ["Hora Extra", "Gratificação"] if c in df_s.columns]
         
-        st.plotly_chart(px.line(df_s, x="Mês/Ano Exibição", y=colunas_y, markers=True, title=f"Evolução - {setor}", category_orders={"Mês/Ano Exibição": ordem_cronologica}), use_container_width=True)
+        st.plotly_chart(px.line(df_s, x="Mês/Ano Exibição", y=colunas_y, markers=True, title=f"Evolução Financeira - {setor}", category_orders={"Mês/Ano Exibição": ordem_cronologica}), use_container_width=True)
+        
+        st.write(f"**Detalhamento Financeiro - {setor}**")
+        formato_moeda = {c: "R$ {:.2f}" for c in df_s.columns if c not in ["Mês/Ano Exibição", "Setor"]}
+        st.dataframe(df_s.style.format(formato_moeda), use_container_width=True, hide_index=True)
 
+    # --- ABA 3: RUBRICA ---
     with t3:
-        rub = st.selectbox("Filtrar Rubrica", df_ano["Rubrica"].unique())
-        res_r = df_ano[df_ano["Rubrica"] == rub].groupby("Mês/Ano Exibição", sort=False)["Valor (R$)"].sum().reset_index()
-        st.plotly_chart(px.bar(res_r, x="Mês/Ano Exibição", y="Valor (R$)", title=f"Custo: {rub}", color_discrete_sequence=["#4CAF50"], category_orders={"Mês/Ano Exibição": ordem_cronologica}), use_container_width=True)
+        rub = st.selectbox("Filtrar Rubrica Específica", df_ano["Rubrica"].unique())
+        df_rub = df_ano[df_ano["Rubrica"] == rub]
+        
+        res_r = df_rub.groupby("Mês/Ano Exibição", sort=False)["Valor (R$)"].sum().reset_index()
+        
+        st.plotly_chart(px.bar(res_r, x="Mês/Ano Exibição", y="Valor (R$)", title=f"Custo Pago: {rub}", color_discrete_sequence=["#4CAF50"], category_orders={"Mês/Ano Exibição": ordem_cronologica}), use_container_width=True)
+        
+        col_t3_1, col_t3_2 = st.columns(2)
+        with col_t3_1:
+            st.write(f"**Total Mensal da Rubrica**")
+            st.dataframe(res_r.style.format({"Valor (R$)": "R$ {:.2f}"}), use_container_width=True, hide_index=True)
+        with col_t3_2:
+            st.write(f"**Divisão por Setor (Soma Anual - {ano_sel})**")
+            df_rub_setor = df_rub.groupby("Setor")["Valor (R$)"].sum().reset_index().sort_values(by="Valor (R$)", ascending=False)
+            st.dataframe(df_rub_setor.style.format({"Valor (R$)": "R$ {:.2f}"}), use_container_width=True, hide_index=True)
 
+    # --- ABA 4: COMPARATIVO ANUAL ---
     with t4:
         st.subheader("Variação do Mesmo Mês entre Anos (Análise Separada)")
         meses_salvos = df_db["Nome do Mês"].unique().tolist()
