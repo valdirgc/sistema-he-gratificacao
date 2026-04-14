@@ -64,7 +64,7 @@ st.markdown("""
 MESES_PT = {
     "01": "Janeiro", "02": "Fevereiro", "03": "Março", "04": "Abril",
     "05": "Maio", "06": "Junho", "07": "Julho", "08": "Agosto",
-    "09": "Setembro", "10": "Outubro", "11": "Novembro", "12": "Dezembro"
+    "09": "Setembro", "10": "Outubro", "11": "Novembro", "12": "Dezembro", "00": "Desconhecido"
 }
 
 RUBRICAS = {
@@ -131,7 +131,8 @@ def extrair_dados_ocr(arquivos):
                         valor = converter_para_numero(nums[-1])
                         registros.append({
                             'Arquivo': arquivo.name, 'Mês/Ano Numérico': mes_ano_arquivo,
-                            'Setor': setor_memoria, 'Código': cod,
+                            'Setor': setor_memoria if setor_memoria != "Não Identificado" else f"Página {idx+1} (Editar)",
+                            'Código': cod,
                             'Rubrica': RUBRICAS[cod]['nome'], 'Tipo': RUBRICAS[cod]['tipo'],
                             'Valor (R$)': valor
                         })
@@ -141,11 +142,14 @@ def extrair_dados_ocr(arquivos):
 
     df = pd.DataFrame(registros)
     if not df.empty:
-        # Ajuste de Datas
         data_final = df[df['Mês/Ano Numérico'] != 'Indefinido']['Mês/Ano Numérico'].max()
-        df['Mês/Ano Numérico'] = data_final
-        df['Mês'] = data_final.split("/")[0]
-        df['Ano'] = data_final.split("/")[1]
+        if pd.notna(data_final):
+            df['Mês/Ano Numérico'] = data_final
+            df['Mês'] = data_final.split("/")[0]
+            df['Ano'] = data_final.split("/")[1]
+        else:
+            df['Mês'] = "00"
+            df['Ano'] = "0000"
     return df
 
 # ==========================================
@@ -161,42 +165,58 @@ if not st.session_state.autenticado:
         pw = st.text_input("Senha", type="password")
         lembrar = st.checkbox("Manter-me conectado")
         if st.button("Entrar"):
-            if user in st.secrets["admin"] and st.secrets["admin"][user] == pw:
-                st.session_state.autenticado, st.session_state.nivel_acesso = True, "admin"
-                st.session_state.usuario_logado = user
-            elif user in st.secrets["viewer"] and st.secrets["viewer"][user] == pw:
-                st.session_state.autenticado, st.session_state.nivel_acesso = True, "viewer"
-                st.session_state.usuario_logado = user
-            
-            if st.session_state.autenticado:
-                if lembrar:
-                    cookie_manager.set("sessao_folha", {"user": user, "nivel": st.session_state.nivel_acesso}, expires_at=datetime.datetime.now() + datetime.timedelta(days=30))
-                st.rerun()
-            else: st.error("Credenciais inválidas")
+            try:
+                if "admin" in st.secrets and user in st.secrets["admin"] and st.secrets["admin"][user] == pw:
+                    st.session_state.autenticado, st.session_state.nivel_acesso = True, "admin"
+                    st.session_state.usuario_logado = user
+                elif "viewer" in st.secrets and user in st.secrets["viewer"] and st.secrets["viewer"][user] == pw:
+                    st.session_state.autenticado, st.session_state.nivel_acesso = True, "viewer"
+                    st.session_state.usuario_logado = user
+                
+                if st.session_state.autenticado:
+                    if lembrar:
+                        cookie_manager.set("sessao_folha", {"user": user, "nivel": st.session_state.nivel_acesso}, expires_at=datetime.datetime.now() + datetime.timedelta(days=30))
+                    st.rerun()
+                else: 
+                    st.error("Credenciais inválidas")
+            except Exception as e:
+                st.error("Erro na leitura do arquivo de senhas (secrets).")
     st.stop()
 
 # ==========================================
 # 6. CONEXÃO DATABASE (GOOGLE SHEETS)
 # ==========================================
-conn = st.connection("gsheets", type=GSheetsConnection)
-df_db = conn.read(worksheet="Dados", ttl=0)
+try:
+    conn = st.connection("gsheets", type=GSheetsConnection)
+    colunas_bd = ["Arquivo", "Mês/Ano Numérico", "Mês", "Ano", "Setor", "Código", "Rubrica", "Tipo", "Valor (R$)"]
+    df_db = conn.read(worksheet="Dados", ttl=0)
 
-if not df_db.empty and "Valor (R$)" in df_db.columns:
-    df_db["Valor (R$)"] = df_db["Valor (R$)"].apply(converter_para_numero)
-    df_db["Mês"] = df_db["Mês"].astype(str).str.replace(".0", "", regex=False).str.zfill(2)
-    df_db["Ano"] = df_db["Ano"].astype(str).str.replace(".0", "", regex=False)
-    df_db["Nome do Mês"] = df_db["Mês"].map(MESES_PT)
-    df_db["Mês/Ano Exibição"] = df_db["Nome do Mês"] + " " + df_db["Ano"]
-    ordem_meses = df_db.sort_values(["Ano", "Mês"])["Mês/Ano Exibição"].unique().tolist()
+    if df_db.empty or "Rubrica" not in df_db.columns:
+        df_db = pd.DataFrame(columns=colunas_bd)
+        ordem_cronologica = []
+    else:
+        df_db["Valor (R$)"] = df_db["Valor (R$)"].apply(converter_para_numero)
+        df_db["Mês"] = df_db["Mês"].astype(str).str.replace(".0", "", regex=False).str.zfill(2)
+        df_db["Ano"] = df_db["Ano"].astype(str).str.replace(".0", "", regex=False)
+        df_db["Nome do Mês"] = df_db["Mês"].map(MESES_PT).fillna("Desconhecido")
+        df_db["Mês/Ano Exibição"] = df_db["Nome do Mês"] + " " + df_db["Ano"]
+        ordem_cronologica = df_db.sort_values(["Ano", "Mês"])["Mês/Ano Exibição"].unique().tolist()
+except Exception as e:
+    st.error("🚨 Erro ao conectar com o Google Sheets. Verifique se a aba se chama 'Dados'.")
+    df_db = pd.DataFrame(columns=["Ano", "Mês/Ano Exibição"]) 
+    ordem_cronologica = []
 
 # ==========================================
 # 7. SIDEBAR (FILTROS E LOGOUT)
 # ==========================================
-st.sidebar.image("logo.png", use_container_width=True)
+try:
+    st.sidebar.image("logo.png", use_container_width=True)
+except:
+    pass # Ignora se a logo não for encontrada
 st.sidebar.markdown("<h3 style='text-align:center;'>Jaborandi/SP</h3>", unsafe_allow_html=True)
 st.sidebar.write("---")
 
-ano_sel = st.sidebar.selectbox("Ano de Referência", sorted(df_db["Ano"].unique(), reverse=True)) if not df_db.empty else None
+ano_sel = st.sidebar.selectbox("Ano de Referência", sorted(df_db["Ano"].unique(), reverse=True)) if not df_db.empty and "Ano" in df_db.columns else None
 df_ano = df_db[df_db["Ano"] == ano_sel] if ano_sel else pd.DataFrame()
 
 if not df_ano.empty:
@@ -227,25 +247,37 @@ if st.session_state.nivel_acesso == "admin":
         if files:
             with st.spinner("IA processando imagens..."):
                 df_novos = extrair_dados_ocr(files)
+                
             if not df_novos.empty:
+                # Agrupa para evitar rubricas duplicadas do OCR na mesma página/setor
+                df_novos = df_novos.groupby(['Arquivo', 'Mês/Ano Numérico', 'Mês', 'Ano', 'Setor', 'Código', 'Rubrica', 'Tipo'], as_index=False)['Valor (R$)'].max()
+                
                 st.write("### ✍️ Homologação de Dados")
                 st.info("Ajuste os nomes dos setores se necessário antes de salvar.")
                 df_homolog = st.data_editor(df_novos, use_container_width=True, hide_index=True)
                 
                 if st.button("💾 Confirmar e Salvar no Banco"):
-                    meses_existentes = df_db["Mês/Ano Numérico"].unique().tolist()
+                    meses_existentes = df_db["Mês/Ano Numérico"].unique().tolist() if "Mês/Ano Numérico" in df_db.columns else []
                     final_to_save = df_homolog[~df_homolog["Mês/Ano Numérico"].isin(meses_existentes)]
+                    
                     if not final_to_save.empty:
-                        conn.update(worksheet="Dados", data=pd.concat([df_db, final_to_save], ignore_index=True))
+                        # Prepara o df_db vazio se for o primeiro envio
+                        if df_db.empty:
+                            df_completo = final_to_save
+                        else:
+                            df_completo = pd.concat([df_db, final_to_save], ignore_index=True)
+                            
+                        conn.update(worksheet="Dados", data=df_completo)
                         st.session_state.relatorio_recem_enviado = True
                         st.session_state.uploader_key += 1
                         st.rerun()
-                    else: st.error("Este mês já existe no banco de dados.")
+                    else: 
+                        st.error("Este mês já existe no banco de dados.")
 
 # ==========================================
 # 9. DASHBOARD (VISUALIZAÇÃO)
 # ==========================================
-if not df_ano.empty:
+if not df_ano.empty and "Mês/Ano Exibição" in df_ano.columns:
     st.write("---")
     t1, t2, t3, t4 = st.tabs(["📈 Geral", "🏢 Por Setor", "🔍 Por Rubrica", "📅 Comparativo Anual"])
 
@@ -255,36 +287,63 @@ if not df_ano.empty:
     with t1:
         c1, c2 = st.columns(2)
         res_geral = df_piv.groupby("Mês/Ano Exibição", sort=False).sum().reset_index()
-        c1.plotly_chart(px.bar(res_geral, x="Mês/Ano Exibição", y="Hora Extra", title="Total Horas Extras", color_discrete_sequence=["#0C3C7A"], category_orders={"Mês/Ano Exibição": ordem_meses}), use_container_width=True)
-        c2.plotly_chart(px.bar(res_geral, x="Mês/Ano Exibição", y="Gratificação", title="Total Gratificações", color_discrete_sequence=["#FF7F0E"], category_orders={"Mês/Ano Exibição": ordem_cronologica}), use_container_width=True)
+        
+        if "Hora Extra" in res_geral.columns:
+            c1.plotly_chart(px.bar(res_geral, x="Mês/Ano Exibição", y="Hora Extra", title="Total Horas Extras", color_discrete_sequence=["#0C3C7A"], category_orders={"Mês/Ano Exibição": ordem_cronologica}), use_container_width=True)
+        if "Gratificação" in res_geral.columns:
+            c2.plotly_chart(px.bar(res_geral, x="Mês/Ano Exibição", y="Gratificação", title="Total Gratificações", color_discrete_sequence=["#FF7F0E"], category_orders={"Mês/Ano Exibição": ordem_cronologica}), use_container_width=True)
+        
         st.dataframe(res_geral.style.format({"Hora Extra": "R$ {:.2f}", "Gratificação": "R$ {:.2f}"}), use_container_width=True, hide_index=True)
 
     with t2:
         setor = st.selectbox("Filtrar Setor", df_piv["Setor"].unique())
         df_s = df_piv[df_piv["Setor"] == setor]
-        st.plotly_chart(px.line(df_s, x="Mês/Ano Exibição", y=["Hora Extra", "Gratificação"], markers=True, title=f"Evolução - {setor}", category_orders={"Mês/Ano Exibição": ordem_meses}), use_container_width=True)
+        colunas_y = [c for c in ["Hora Extra", "Gratificação"] if c in df_s.columns]
+        
+        st.plotly_chart(px.line(df_s, x="Mês/Ano Exibição", y=colunas_y, markers=True, title=f"Evolução - {setor}", category_orders={"Mês/Ano Exibição": ordem_cronologica}), use_container_width=True)
 
     with t3:
         rub = st.selectbox("Filtrar Rubrica", df_ano["Rubrica"].unique())
         res_r = df_ano[df_ano["Rubrica"] == rub].groupby("Mês/Ano Exibição", sort=False)["Valor (R$)"].sum().reset_index()
-        st.plotly_chart(px.bar(res_r, x="Mês/Ano Exibição", y="Valor (R$)", title=f"Custo: {rub}", color_discrete_sequence=["#4CAF50"], category_orders={"Mês/Ano Exibição": ordem_meses}), use_container_width=True)
+        st.plotly_chart(px.bar(res_r, x="Mês/Ano Exibição", y="Valor (R$)", title=f"Custo: {rub}", color_discrete_sequence=["#4CAF50"], category_orders={"Mês/Ano Exibição": ordem_cronologica}), use_container_width=True)
 
     with t4:
-        st.subheader("Variação do Mesmo Mês entre Anos")
-        mes_ref = st.selectbox("Mês de Comparação", df_db["Nome do Mês"].unique())
-        df_comp = df_db[df_db["Nome do Mês"] == mes_ref].groupby(["Ano", "Tipo"])["Valor (R$)"].sum().reset_index()
+        st.subheader("Variação do Mesmo Mês entre Anos (Análise Separada)")
+        meses_salvos = df_db["Nome do Mês"].unique().tolist()
         
-        c1, c2 = st.columns(2)
-        with c1:
-            st.markdown("##### 🕒 Horas Extras")
-            fig_he = px.bar(df_comp[df_comp["Tipo"]=="Hora Extra"], x="Ano", y="Valor (R$)", text_auto=".2s", color_discrete_sequence=["#0C3C7A"])
-            st.plotly_chart(fig_he, use_container_width=True)
-        with c2:
-            st.markdown("##### 💰 Gratificações")
-            fig_gr = px.bar(df_comp[df_comp["Tipo"]=="Gratificação"], x="Ano", y="Valor (R$)", text_auto=".2s", color_discrete_sequence=["#FF7F0E"])
-            st.plotly_chart(fig_gr, use_container_width=True)
-        
-        st.write("**Tabela Consolidada**")
-        st.dataframe(df_comp.pivot(index="Ano", columns="Tipo", values="Valor (R$)").style.format("R$ {:.2f}"), use_container_width=True)
+        if meses_salvos:
+            mes_ref = st.selectbox("Mês de Comparação", meses_salvos)
+            df_comp = df_db[df_db["Nome do Mês"] == mes_ref].groupby(["Ano", "Tipo"])["Valor (R$)"].sum().reset_index()
+            df_comp["Ano"] = df_comp["Ano"].astype(str)
+            
+            col_comp1, col_comp2 = st.columns(2)
+            
+            with col_comp1:
+                st.markdown("##### 🕒 Horas Extras")
+                df_he_comp = df_comp[df_comp["Tipo"] == "Hora Extra"]
+                if not df_he_comp.empty:
+                    fig_he = px.bar(df_he_comp, x="Ano", y="Valor (R$)", text_auto=".2s", color_discrete_sequence=["#0C3C7A"])
+                    fig_he.update_traces(textposition='outside')
+                    st.plotly_chart(fig_he, use_container_width=True)
+                else:
+                    st.info("Sem lançamentos de Hora Extra neste mês.")
+                    
+            with col_comp2:
+                st.markdown("##### 💰 Gratificações")
+                df_gr_comp = df_comp[df_comp["Tipo"] == "Gratificação"]
+                if not df_gr_comp.empty:
+                    fig_gr = px.bar(df_gr_comp, x="Ano", y="Valor (R$)", text_auto=".2s", color_discrete_sequence=["#FF7F0E"])
+                    fig_gr.update_traces(textposition='outside')
+                    st.plotly_chart(fig_gr, use_container_width=True)
+                else:
+                    st.info("Sem lançamentos de Gratificação neste mês.")
+            
+            st.write("**Tabela Consolidada (Comparativo Anual)**")
+            if not df_comp.empty:
+                df_comp_pivot = df_comp.pivot(index="Ano", columns="Tipo", values="Valor (R$)").fillna(0).reset_index()
+                formato_moeda_comp = {col: "R$ {:.2f}" for col in df_comp_pivot.columns if col != 'Ano'}
+                st.dataframe(df_comp_pivot.style.format(formato_moeda_comp), use_container_width=True, hide_index=True)
 
-else: st.info("Aguardando upload de dados para exibir o Dashboard.")
+else: 
+    if st.session_state.autenticado:
+        st.info("Aguardando upload de dados para exibir o Dashboard.")
