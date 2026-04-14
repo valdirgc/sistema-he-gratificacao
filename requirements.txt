@@ -6,3 +6,4 @@ pdf2image
 pytesseract
 Pillow
 st-gsheets-connection
+extra-streamlit-components
