@@ -22,11 +22,13 @@ def processar_pdf(arquivos):
     for arquivo in arquivos:
         with pdfplumber.open(arquivo) as pdf:
             mes_atual = "Indefinido"
-            setor_atual = "Não Identificado"
+            
+            # O SEGREDO: O setor fica FORA do ciclo das páginas para não sofrer amnésia
+            setor_memoria = "Não Identificado"
 
             for num_pagina, pagina in enumerate(pdf.pages):
                 
-                # --- LEITURA 1: MODO LÓGICO (Perfeito para achar o Nome do Setor) ---
+                # --- LEITURA 1: MODO LÓGICO (Atualiza a memória do Setor) ---
                 texto_logico = pagina.extract_text()
                 if not texto_logico: continue
                 
@@ -40,28 +42,25 @@ def processar_pdf(arquivos):
                     if "Local de Trabalho:" in linha:
                         parte = linha.split("Local de Trabalho:")[1].strip()
                         
-                        # Se estiver vazio na mesma linha, pega a linha de baixo
+                        # Se estiver vazio, tenta a linha de baixo
                         if not parte and i + 1 < len(linhas_logicas):
                             parte = linhas_logicas[i+1].strip()
                             
-                        # Limpa palavras que costumam vazar para o nome
+                        # Limpa palavras que costumam aparecer ao lado
                         parte = re.split(r'Mês/Ano|Folha|Página|Matrícula', parte, flags=re.IGNORECASE)[0].strip()
                         
-                        # Se não for lixo do cabeçalho, salva o nome do setor
+                        # SÓ atualiza a memória se houver um nome válido. 
+                        # Se estiver em branco na página de resumo, mantém o da página anterior!
                         if parte and parte.lower() not in ["matrícula", "nome", "desligamento", ""]:
                             if "-" in parte:
-                                setor_atual = parte.split("-", 1)[-1].strip().title()
+                                setor_memoria = parte.split("-", 1)[-1].strip().title()
                             else:
-                                setor_atual = parte.title()
+                                setor_memoria = parte.title()
                         break
 
-                # --- LEITURA 2: MODO VISUAL (Perfeito para achar o Dinheiro) ---
+                # --- LEITURA 2: MODO VISUAL (Busca o Dinheiro) ---
                 texto_visual = pagina.extract_text(layout=True)
                 linhas_visuais = texto_visual.split('\n')
-
-                setor_exibicao = setor_atual
-                if not setor_exibicao or setor_exibicao == "Não Identificado":
-                    setor_exibicao = f"Setor não identificado (Página {num_pagina+1})"
 
                 he_max = 0.0
                 grat_max = 0.0
@@ -78,17 +77,17 @@ def processar_pdf(arquivos):
                             
                             if tem_he and valor > he_max:
                                 he_max = valor
-                                log_extracao.append(f"Pág {num_pagina+1} | {setor_exibicao} | HE: R$ {valor:.2f}")
+                                log_extracao.append(f"Pág {num_pagina+1} | {setor_memoria} | HE: R$ {valor:.2f}")
                                 
                             if tem_grat and valor > grat_max:
                                 grat_max = valor
-                                log_extracao.append(f"Pág {num_pagina+1} | {setor_exibicao} | Gratificações: R$ {valor:.2f}")
+                                log_extracao.append(f"Pág {num_pagina+1} | {setor_memoria} | Gratificações: R$ {valor:.2f}")
 
-                # Só envia para a tabela se achou dinheiro
+                # Associa os valores encontrados à memória do setor atual
                 if he_max > 0 or grat_max > 0:
                     dados_gerais.append({
                         'Mês/Ano': mes_atual,
-                        'Setor': setor_exibicao,
+                        'Setor': setor_memoria,
                         'Horas Extras (R$)': he_max,
                         'Gratificações (R$)': grat_max
                     })
@@ -98,7 +97,7 @@ def processar_pdf(arquivos):
 
     df = pd.DataFrame(dados_gerais)
     
-    # Agrupa pelo Setor e Mês, garantindo o maior valor daquela sessão
+    # Agrupa por Mês e Setor (o valor máximo de cada página para evitar duplicados)
     df_agrupado = df.groupby(['Mês/Ano', 'Setor'], as_index=False).max()
     df_agrupado['Total Geral (R$)'] = df_agrupado['Horas Extras (R$)'] + df_agrupado['Gratificações (R$)']
     
@@ -109,10 +108,10 @@ def processar_pdf(arquivos):
 arquivos_upload = st.file_uploader("Upload dos Resumos Contábeis (PDF)", type=["pdf"], accept_multiple_files=True)
 
 if arquivos_upload:
-    with st.spinner('Processando Setores e Valores (Leitura Dupla)...'):
+    with st.spinner('A carregar ficheiros e consolidar setores...'):
         df, logs = processar_pdf(arquivos_upload)
         
-    with st.expander("🛠️ Log do Extrator Definitivo (Verifique os Nomes dos Setores)"):
+    with st.expander("🛠️ Registo de Extração (Verifique a Memória dos Setores)"):
         if logs:
             for log in logs:
                 st.text(log)
@@ -120,7 +119,7 @@ if arquivos_upload:
             st.text("Nenhum valor localizado.")
             
     if not df.empty:
-        st.success("Dados resgatados com sucesso!")
+        st.success("Dados lidos com sucesso!")
         
         st.sidebar.header("Filtros Setoriais")
         lista_setores = df['Setor'].unique().tolist()
@@ -169,4 +168,4 @@ if arquivos_upload:
     else:
         st.warning("Não localizamos nenhum valor de Hora Extra ou Gratificação nos PDFs enviados.")
 else:
-    st.info("Aguardando o envio dos arquivos PDF.")
+    st.info("A aguardar o envio dos ficheiros PDF.")
