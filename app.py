@@ -9,7 +9,6 @@ st.title("Controle Setorial - Horas Extras e Gratificações")
 st.markdown("Faça o upload dos **Resumos Contábeis em PDF** da Fiorilli.")
 
 def limpar_valor(valor_str):
-    # Converte texto para moeda R$
     digitos = re.sub(r'\D', '', str(valor_str))
     if digitos:
         return float(digitos) / 100.0
@@ -26,66 +25,72 @@ def processar_pdf(arquivos):
             setor_atual = "Não Identificado"
 
             for num_pagina, pagina in enumerate(pdf.pages):
-                # Usa o layout visual para garantir que os números não se misturem
-                texto = pagina.extract_text(layout=True)
-                if not texto: continue
-                linhas = texto.split('\n')
-
-                # 1. Tenta achar o Mês/Ano
-                match_mes = re.search(r"Mês/Ano\s*(\d{2}/\d{4})", texto, re.IGNORECASE)
-                if match_mes: mes_atual = match_mes.group(1)
-
-                # 2. Tenta achar o Setor
-                for i, linha in enumerate(linhas):
+                
+                # --- LEITURA 1: MODO LÓGICO (Perfeito para achar o Nome do Setor) ---
+                texto_logico = pagina.extract_text()
+                if not texto_logico: continue
+                
+                linhas_logicas = texto_logico.split('\n')
+                
+                for i, linha in enumerate(linhas_logicas):
+                    if "Mês/Ano" in linha:
+                        match = re.search(r"(\d{2}/\d{4})", linha)
+                        if match: mes_atual = match.group(1)
+                        
                     if "Local de Trabalho:" in linha:
                         parte = linha.split("Local de Trabalho:")[1].strip()
-                        if parte:
-                            setor_atual = parte
-                        elif i + 1 < len(linhas) and linhas[i+1].strip():
-                            setor_atual = linhas[i+1].strip()
+                        
+                        # Se estiver vazio na mesma linha, pega a linha de baixo
+                        if not parte and i + 1 < len(linhas_logicas):
+                            parte = linhas_logicas[i+1].strip()
+                            
+                        # Limpa palavras que costumam vazar para o nome
+                        parte = re.split(r'Mês/Ano|Folha|Página|Matrícula', parte, flags=re.IGNORECASE)[0].strip()
+                        
+                        # Se não for lixo do cabeçalho, salva o nome do setor
+                        if parte and parte.lower() not in ["matrícula", "nome", "desligamento", ""]:
+                            if "-" in parte:
+                                setor_atual = parte.split("-", 1)[-1].strip().title()
+                            else:
+                                setor_atual = parte.title()
                         break
 
-                # Limpa o nome do setor
-                setor_limpo = setor_atual
-                if "-" in setor_atual:
-                    setor_limpo = setor_atual.split("-", 1)[-1].strip()
-                setor_limpo = re.sub(r'\s+', ' ', setor_limpo).title()
-                
-                # A CORREÇÃO DE OURO: Se o setor vier em branco, jamais descarte os dados!
-                if not setor_limpo or setor_limpo == "Não Identificado" or setor_limpo == "Matrícula Nome Desligamento":
-                    setor_limpo = f"Setor não identificado (Página {num_pagina+1})"
+                # --- LEITURA 2: MODO VISUAL (Perfeito para achar o Dinheiro) ---
+                texto_visual = pagina.extract_text(layout=True)
+                linhas_visuais = texto_visual.split('\n')
 
-                # 3. Caça aos Valores (Mantém o maior da página)
-                he_max_pag = 0.0
-                grat_max_pag = 0.0
+                setor_exibicao = setor_atual
+                if not setor_exibicao or setor_exibicao == "Não Identificado":
+                    setor_exibicao = f"Setor não identificado (Página {num_pagina+1})"
 
-                for linha in linhas:
+                he_max = 0.0
+                grat_max = 0.0
+
+                for linha in linhas_visuais:
                     linha_lower = linha.lower()
-                    
                     tem_he = any(kw in linha_lower for kw in ['hora extra', 'horas extras', 'comp.carga', 'comp. carga'])
                     tem_grat = any(kw in linha_lower for kw in ['gratific', 'samu'])
 
                     if tem_he or tem_grat:
-                        # Pega o último número financeiro da linha
                         numeros = re.findall(r'(?<!\d)\d{1,3}(?:[\.\,]\d{3})*[\.\,]\d{2}(?!\d)', linha)
                         if numeros:
                             valor = limpar_valor(numeros[-1])
                             
-                            if tem_he and valor > he_max_pag:
-                                he_max_pag = valor
-                                log_extracao.append(f"Pág {num_pagina+1} | {setor_limpo} | HE: R$ {valor:.2f}")
+                            if tem_he and valor > he_max:
+                                he_max = valor
+                                log_extracao.append(f"Pág {num_pagina+1} | {setor_exibicao} | HE: R$ {valor:.2f}")
                                 
-                            if tem_grat and valor > grat_max_pag:
-                                grat_max_pag = valor
-                                log_extracao.append(f"Pág {num_pagina+1} | {setor_limpo} | Gratificações: R$ {valor:.2f}")
+                            if tem_grat and valor > grat_max:
+                                grat_max = valor
+                                log_extracao.append(f"Pág {num_pagina+1} | {setor_exibicao} | Gratificações: R$ {valor:.2f}")
 
-                # Só salva se tiver encontrado algum valor financeiro
-                if he_max_pag > 0 or grat_max_pag > 0:
+                # Só envia para a tabela se achou dinheiro
+                if he_max > 0 or grat_max > 0:
                     dados_gerais.append({
                         'Mês/Ano': mes_atual,
-                        'Setor': setor_limpo,
-                        'Horas Extras (R$)': he_max_pag,
-                        'Gratificações (R$)': grat_max_pag
+                        'Setor': setor_exibicao,
+                        'Horas Extras (R$)': he_max,
+                        'Gratificações (R$)': grat_max
                     })
 
     if not dados_gerais:
@@ -93,20 +98,21 @@ def processar_pdf(arquivos):
 
     df = pd.DataFrame(dados_gerais)
     
-    # Agrupa por Mês e Setor pegando o valor máximo encontrado (o Resumo do Setor)
+    # Agrupa pelo Setor e Mês, garantindo o maior valor daquela sessão
     df_agrupado = df.groupby(['Mês/Ano', 'Setor'], as_index=False).max()
     df_agrupado['Total Geral (R$)'] = df_agrupado['Horas Extras (R$)'] + df_agrupado['Gratificações (R$)']
     
     return df_agrupado.sort_values(by='Mês/Ano'), log_extracao
 
+
 # --- INTERFACE DO APLICATIVO ---
 arquivos_upload = st.file_uploader("Upload dos Resumos Contábeis (PDF)", type=["pdf"], accept_multiple_files=True)
 
 if arquivos_upload:
-    with st.spinner('Extraindo dados sem bloqueios...'):
+    with st.spinner('Processando Setores e Valores (Leitura Dupla)...'):
         df, logs = processar_pdf(arquivos_upload)
         
-    with st.expander("🛠️ Log do Extrator Salva-Vidas"):
+    with st.expander("🛠️ Log do Extrator Definitivo (Verifique os Nomes dos Setores)"):
         if logs:
             for log in logs:
                 st.text(log)
