@@ -2,3 +2,6 @@ streamlit
 pandas
 plotly
 pdfplumber
+pdf2image
+pytesseract
+Pillow
