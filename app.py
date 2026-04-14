@@ -461,12 +461,40 @@ if not df_ano.empty and "Mês/Ano Exibição" in df_ano.columns:
 
     # --- ABA 4: COMPARATIVO ANUAL ---
     with aba4:
-        st.subheader("Variação do Mesmo Mês entre Anos")
+        st.subheader("Variação do Mesmo Mês entre Anos (Detalhamento)")
         meses_salvos = df_db["Nome do Mês"].unique().tolist()
+        
         if meses_salvos:
             mes_escolhido = st.selectbox("Selecione o Mês para comparar:", meses_salvos)
-            df_comparativo = df_db[df_db["Nome do Mês"] == mes_escolhido].groupby("Ano")[["Valor (R$)"]].sum().reset_index()
+            
+            # Agrupa agora pelo Ano E pelo Tipo (Hora Extra / Gratificação)
+            df_comparativo = df_db[df_db["Nome do Mês"] == mes_escolhido].groupby(["Ano", "Tipo"])[["Valor (R$)"]].sum().reset_index()
             df_comparativo["Ano"] = df_comparativo["Ano"].astype(str)
             
-            fig_a1 = px.bar(df_comparativo, x="Ano", y="Valor (R$)", text_auto=".2s", color="Ano", title=f"Variação Financeira - {mes_escolhido}")
-            st.plotly_chart(fig_a1, use_container_width=True, key=f"g_ano{id_sufixo}")
+            if not df_comparativo.empty:
+                # Cria o gráfico com barras agrupadas (lado a lado)
+                fig_a1 = px.bar(
+                    df_comparativo, 
+                    x="Ano", 
+                    y="Valor (R$)", 
+                    color="Tipo", 
+                    barmode="group", # Coloca as barras lado a lado
+                    text_auto=".2s", 
+                    title=f"Variação Financeira por Categoria - {mes_escolhido}",
+                    color_discrete_map={"Hora Extra": "#0C3C7A", "Gratificação": "#FF7F0E"} # Cores padronizadas
+                )
+                
+                # Joga o texto do valor para cima da barra para não amontoar
+                fig_a1.update_traces(textposition='outside')
+                
+                st.plotly_chart(fig_a1, use_container_width=True, key=f"g_ano{id_sufixo}")
+                
+                # Adiciona também uma tabelinha resumo abaixo do gráfico para facilitar a cópia
+                st.write("**Tabela de Variação (Valores Totais)**")
+                df_comp_pivot = df_comparativo.pivot(index="Ano", columns="Tipo", values="Valor (R$)").fillna(0).reset_index()
+                
+                # Formata a tabela para moeda
+                formato_moeda_comp = {col: "R$ {:.2f}" for col in df_comp_pivot.columns if col != 'Ano'}
+                st.dataframe(df_comp_pivot.style.format(formato_moeda_comp), use_container_width=True, hide_index=True)
+            else:
+                st.info(f"Não há lançamentos de rubricas no mês de {mes_escolhido} nos anos selecionados.")
